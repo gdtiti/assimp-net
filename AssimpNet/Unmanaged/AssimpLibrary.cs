@@ -26,6 +26,7 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.ConstrainedExecution;
 using System.Runtime.InteropServices;
+using NativeLibraryLoader;
 
 namespace Assimp.Unmanaged
 {
@@ -37,7 +38,6 @@ namespace Assimp.Unmanaged
 	{
 		private static AssimpLibrary s_instance;
 		private AssimpLibraryImplementation m_impl;
-		private String m_libraryPath = "";
 
 		private bool m_enableVerboseLogging = false;
 
@@ -59,42 +59,11 @@ namespace Assimp.Unmanaged
 			get
 			{
 				if (s_instance == null)
+				{
 					s_instance = new AssimpLibrary();
+				}
 
 				return s_instance;
-			}
-		}
-
-		/// <summary>
-		/// Gets the default path used for loading the 32-bit version of the unmanaged Assimp DLL.
-		/// </summary>
-		public String DefaultLibraryPath32Bit
-		{
-			get
-			{
-				return m_impl.DefaultLibraryPath32Bit;
-			}
-		}
-
-		/// <summary>
-		/// Gets the default path used for loading the 64-bit version of the unmanaged Assimp DLL.
-		/// </summary>
-		public String DefaultLibraryPath64Bit
-		{
-			get
-			{
-				return m_impl.DefaultLibraryPath64Bit;
-			}
-		}
-
-		/// <summary>
-		/// Gets the current path to the unmanaged Assimp DLL that is loaded.
-		/// </summary>
-		public String LibraryPath
-		{
-			get
-			{
-				return m_libraryPath;
 			}
 		}
 
@@ -138,12 +107,9 @@ namespace Assimp.Unmanaged
 			}
 
 			var impl = AssimpDefaultLibraryPath.CreateRuntimeImplementation();
-			string libPath = (IntPtr.Size == 8) ? impl.DefaultLibraryPath64Bit : impl.DefaultLibraryPath32Bit;
-
-			impl.LoadAssimpLibrary(libPath);
+			impl.LoadAssimpLibrary();
 
 			m_impl = impl;
-			m_libraryPath = libPath;
 
 			OnLibraryLoaded();
 		}
@@ -160,10 +126,9 @@ namespace Assimp.Unmanaged
 				throw new AssimpException("Assimp library already loaded.");
 
 			AssimpLibraryImplementation impl = AssimpDefaultLibraryPath.CreateRuntimeImplementation();
-			impl.LoadAssimpLibrary(libPath);
+			impl.LoadAssimpLibrary();
 
 			m_impl = impl;
-			m_libraryPath = libPath;
 
 			OnLibraryLoaded();
 		}
@@ -191,7 +156,6 @@ namespace Assimp.Unmanaged
 
 				m_impl.FreeAssimpLibrary();
 				m_impl = null;
-				m_libraryPath = String.Empty;
 			}
 		}
 
@@ -1464,22 +1428,12 @@ namespace Assimp.Unmanaged
 	/// </summary>
 	internal static class AssimpDefaultLibraryPath
 	{
-		public const string DefaultWindows32BitPath = "Assimp32.dll";
-		public const string DefaultWindows64BitPath = "Assimp64.dll";
-
 		public const string DefaultLinux32BitPath = "Assimp32.so";
 		public const string DefaultLinux64BitPath = "Assimp64.so";
 
 		public static AssimpLibraryImplementation CreateRuntimeImplementation()
 		{
-			if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-			{
-				return new AssimpLibraryLinuxImplementation();
-			}
-			else
-			{
-				return new AssimpLibraryWindowsImplementation();
-			}
+			return new AssimpLibraryNetstandardImplementation();
 		}
 	}
 
@@ -1497,25 +1451,15 @@ namespace Assimp.Unmanaged
 
 		public bool IsDisposed => _isDisposed;
 
-		public abstract string DefaultLibraryPath32Bit
-		{
-			get;
-		}
-
-		public abstract string DefaultLibraryPath64Bit
-		{
-			get;
-		}
-
 		~AssimpLibraryImplementation()
 		{
 			Dispose(false);
 		}
 
-		public void LoadAssimpLibrary(string path)
+		public void LoadAssimpLibrary()
 		{
 			FreeAssimpLibrary(true);
-			_libraryHandle = NativeLoadLibrary(path);
+			_libraryHandle = NativeLoadLibrary();
 
 			//When we load the library, we preload all the functions so we don't have to synchronize our GetFunction method
 			PreloadFunctions();
@@ -1577,7 +1521,7 @@ namespace Assimp.Unmanaged
 			GC.SuppressFinalize(this);
 		}
 
-		protected abstract IntPtr NativeLoadLibrary(string path);
+		protected abstract IntPtr NativeLoadLibrary();
 		protected abstract void NativeFreeLibrary(IntPtr handle);
 		protected abstract IntPtr NativeGetProcAddress(IntPtr handle, String functionName);
 
@@ -1617,133 +1561,44 @@ namespace Assimp.Unmanaged
 		}
 	}
 
-	#region Windows Implementation
-
-	/// <summary>
-	/// Windows implementation for loading the unmanaged assimp library.
-	/// </summary>
-	internal sealed class AssimpLibraryWindowsImplementation : AssimpLibraryImplementation
+	#region netstandard Implementation
+	internal sealed class AssimpLibraryNetstandardImplementation : AssimpLibraryImplementation
 	{
-		public override string DefaultLibraryPath32Bit
+		private LibraryLoader _loader;
+
+		public static string LibraryPath
 		{
 			get
 			{
-				return AssimpDefaultLibraryPath.DefaultWindows32BitPath;
-			}
-		}
-
-		public override string DefaultLibraryPath64Bit
-		{
-			get
-			{
-				return AssimpDefaultLibraryPath.DefaultWindows64BitPath;
-			}
-		}
-
-		[DllImport("kernel32.dll", CharSet = CharSet.Auto, BestFitMapping = false, SetLastError = true)]
-		private static extern IntPtr LoadLibrary(string fileName);
-
-		[ReliabilityContract(Consistency.WillNotCorruptState, Cer.Success)]
-		[DllImport("kernel32.dll", SetLastError = true)]
-		[return: MarshalAs(UnmanagedType.Bool)]
-		private static extern bool FreeLibrary(IntPtr hModule);
-
-		[DllImport("kernel32.dll")]
-		private static extern IntPtr GetProcAddress(IntPtr hModule, String procName);
-
-		protected override IntPtr NativeLoadLibrary(string path)
-		{
-			IntPtr libraryHandle = LoadLibrary(path);
-
-			if (libraryHandle == IntPtr.Zero)
-			{
-				int hr = Marshal.GetHRForLastWin32Error();
-				Exception innerException = Marshal.GetExceptionForHR(hr);
-				if (innerException != null)
-					throw new AssimpException("Error loading unmanaged library from path: " + path + ", see inner exception for details.\n" + innerException.Message, innerException);
+				if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+				{
+					return "libassimp.so";
+				}
+				else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+				{
+					return "libassimp.dylib";
+				}
 				else
-					throw new AssimpException("Error loading unmanaged library from path: " + path);
+				{
+					return "assimp-vc140-mt.dll";
+				}
 			}
-
-			return libraryHandle;
 		}
 
 		protected override void NativeFreeLibrary(IntPtr handle)
 		{
-			FreeLibrary(handle);
-		}
-
-		protected override IntPtr NativeGetProcAddress(IntPtr handle, String functionName)
-		{
-			return GetProcAddress(handle, functionName);
-		}
-	}
-
-	#endregion
-
-	#region Linux Implementation
-
-	/// <summary>
-	/// Linux implementation for loading the unmanaged assimp library.
-	/// </summary>
-	internal sealed class AssimpLibraryLinuxImplementation : AssimpLibraryImplementation
-	{
-
-		public override string DefaultLibraryPath32Bit
-		{
-			get
-			{
-				return AssimpDefaultLibraryPath.DefaultLinux32BitPath;
-			}
-		}
-
-		public override string DefaultLibraryPath64Bit
-		{
-			get
-			{
-				return AssimpDefaultLibraryPath.DefaultLinux64BitPath;
-			}
-		}
-
-		[DllImport("libdl.so")]
-		private static extern IntPtr dlopen(String fileName, int flags);
-
-		[DllImport("libdl.so")]
-		private static extern IntPtr dlsym(IntPtr handle, String functionName);
-
-		[DllImport("libdl.so")]
-		private static extern int dlclose(IntPtr handle);
-
-		[DllImport("libdl.so")]
-		private static extern IntPtr dlerror();
-
-		private const int RTLD_NOW = 2;
-
-		protected override IntPtr NativeLoadLibrary(String path)
-		{
-			IntPtr libraryHandle = dlopen(path, RTLD_NOW);
-
-			if (libraryHandle == IntPtr.Zero)
-			{
-				IntPtr errPtr = dlerror();
-				String msg = Marshal.PtrToStringAnsi(errPtr);
-				if (!String.IsNullOrEmpty(msg))
-					throw new AssimpException("Error loading unmanaged library from path: " + path + ", error detail:\n" + msg);
-				else
-					throw new AssimpException("Error loading unmanaged library from path: " + path);
-			}
-
-			return libraryHandle;
-		}
-
-		protected override void NativeFreeLibrary(IntPtr handle)
-		{
-			dlclose(handle);
+			_loader.FreeNativeLibrary(handle);
 		}
 
 		protected override IntPtr NativeGetProcAddress(IntPtr handle, string functionName)
 		{
-			return dlsym(handle, functionName);
+			return _loader.LoadFunctionPointer(handle, functionName);
+		}
+
+		protected override IntPtr NativeLoadLibrary()
+		{
+			_loader = LibraryLoader.GetPlatformDefaultLoader();
+			return _loader.LoadNativeLibrary(LibraryPath);
 		}
 	}
 
